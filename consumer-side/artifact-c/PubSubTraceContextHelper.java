@@ -18,12 +18,16 @@ import lombok.extern.slf4j.Slf4j;
  * and activate it as the current trace, ensuring trace continuity across services.
  */
 @Slf4j
+@SuppressWarnings("PMD.CloseResource")
 public class PubSubTraceContextHelper {
 
     private static final String X_DATADOG_TRACE_ID = "x-datadog-trace-id";
     private static final String X_DATADOG_PARENT_ID = "x-datadog-parent-id";
     private static final String X_DATADOG_SAMPLING_PRIORITY = "x-datadog-sampling-priority";
     private static final String DD_TRACE_ID = "dd.trace_id";
+    private static final String EMPTY_TRACE_ID = "0";
+    private static final String DEFAULT_SPAN_ID = "0";
+    private static final String DEFAULT_SAMPLING_PRIORITY = "1";
 
     private PubSubTraceContextHelper() {
     }
@@ -37,30 +41,30 @@ public class PubSubTraceContextHelper {
             return null;
         }
 
-        // Build carrier map with standard Datadog headers
-        Map<String, String> carrier = new HashMap<>();
-
         // Support both "x-datadog-trace-id" (standard) and "dd.trace_id" (legacy) formats
         String traceId = attributes.get(X_DATADOG_TRACE_ID);
         if (traceId == null || traceId.isEmpty()) {
             traceId = attributes.get(DD_TRACE_ID);
         }
 
-        if (traceId == null || traceId.isEmpty() || "0".equals(traceId)) {
+        if (traceId == null || traceId.isEmpty() || EMPTY_TRACE_ID.equals(traceId)) {
             log.debug("No trace ID found in PubSub attributes, skipping trace activation");
             return null;
         }
 
-        // Map to standard Datadog propagation headers
+        // Build carrier map with standard Datadog propagation headers
+        Map<String, String> carrier = new HashMap<>();
         carrier.put(X_DATADOG_TRACE_ID, traceId);
         carrier.put(X_DATADOG_PARENT_ID,
                 attributes.getOrDefault(X_DATADOG_PARENT_ID,
-                        attributes.getOrDefault("dd.span_id", "0")));
+                        attributes.getOrDefault("dd.span_id", DEFAULT_SPAN_ID)));
         carrier.put(X_DATADOG_SAMPLING_PRIORITY,
-                attributes.getOrDefault(X_DATADOG_SAMPLING_PRIORITY, "1"));
+                attributes.getOrDefault(X_DATADOG_SAMPLING_PRIORITY, DEFAULT_SAMPLING_PRIORITY));
 
-        log.info("Extracting trace context from PubSub: x-datadog-trace-id={}, x-datadog-parent-id={}",
-                carrier.get(X_DATADOG_TRACE_ID), carrier.get(X_DATADOG_PARENT_ID));
+        if (log.isInfoEnabled()) {
+            log.info("Extracting trace context from PubSub: x-datadog-trace-id={}, x-datadog-parent-id={}",
+                    carrier.get(X_DATADOG_TRACE_ID), carrier.get(X_DATADOG_PARENT_ID));
+        }
 
         try {
             Tracer tracer = GlobalTracer.get();
@@ -72,12 +76,13 @@ public class PubSubTraceContextHelper {
                         .asChildOf(extractedContext)
                         .start();
                 Scope scope = tracer.activateSpan(childSpan);
-                log.info("Activated propagated trace context: parent_trace_id={}, new dd.trace_id={}, dd.span_id={}",
-                        traceId, CorrelationIdentifier.getTraceId(), CorrelationIdentifier.getSpanId());
+                if (log.isInfoEnabled()) {
+                    log.info("Activated propagated trace context: parent_trace_id={}, new dd.trace_id={}, dd.span_id={}",
+                            traceId, CorrelationIdentifier.getTraceId(), CorrelationIdentifier.getSpanId());
+                }
                 return scope;
             } else {
-                log.warn("Could not extract trace context from PubSub attributes (tracer returned null), " +
-                        "trace_id={}", traceId);
+                log.warn("Could not extract trace context from PubSub attributes (tracer returned null), trace_id={}", traceId);
                 return null;
             }
         } catch (Exception e) {
