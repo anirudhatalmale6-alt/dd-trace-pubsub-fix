@@ -78,9 +78,8 @@ public class EventsController {
         }
 
         // Activate the propagated trace context from upstream service
-        try (PubSubTraceContextHelper.TraceScope traceScope =
-                     PubSubTraceContextHelper.activateTraceFromAttributes(
-                             message.getAttributes(), "events.process")) {
+        return PubSubTraceContextHelper.executeWithTrace(
+                message.getAttributes(), "events.process", () -> {
 
             String deliveryAttemptLog = Optional.ofNullable(pubsubRequest.getDeliveryAttempt())
                     .map(s -> format(" and delivery attempt :: %s", s))
@@ -117,9 +116,9 @@ public class EventsController {
             }
 
             eventHandlerStrategyDelegator.determineAndCallStrategy(pubsubRequest, headers);
-        }
 
-        return ResponseEntity.status(OK).build();
+            return ResponseEntity.status(OK).build();
+        });
 
     }
 

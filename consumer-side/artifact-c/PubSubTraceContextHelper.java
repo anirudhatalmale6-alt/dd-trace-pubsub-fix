@@ -33,26 +33,85 @@ public class PubSubTraceContextHelper {
     }
 
     /**
-     * Extracts trace context from PubSub message attributes and activates a child span.
-     * Returns a Scope that should be closed via {@link #deactivateTrace(Scope)} when done.
+     * Functional interface for operations that may throw checked exceptions.
      */
-    public static Scope activateTraceFromPubSub(Map<String, String> attributes) {
+    @FunctionalInterface
+    public interface TracedOperation<T> {
+        T execute() throws Exception;
+    }
+
+    /**
+     * Functional interface for void operations that may throw checked exceptions.
+     */
+    @FunctionalInterface
+    public interface TracedRunnable {
+        void run() throws Exception;
+    }
+
+    /**
+     * Executes an operation within the propagated trace context extracted from PubSub attributes.
+     * Activates the trace before execution and deactivates it after, regardless of outcome.
+     *
+     * Usage:
+     * <pre>
+     * ResponseEntity response = PubSubTraceContextHelper.executeWithTrace(
+     *     message.getAttributes(), "events.process",
+     *     () -> {
+     *         eventHandlerStrategyDelegator.determineAndCallStrategy(pubsubRequest, headers);
+     *         return ResponseEntity.status(OK).build();
+     *     });
+     * </pre>
+     */
+    public static <T> T executeWithTrace(Map<String, String> attributes, String operationName,
+                                          TracedOperation<T> operation) throws Exception {
+        Span span = null;
+        Scope scope = null;
+        try {
+            SpanContext extractedContext = extractTraceContext(attributes);
+            if (extractedContext != null) {
+                Tracer tracer = GlobalTracer.get();
+                span = tracer.buildSpan(operationName).asChildOf(extractedContext).start();
+                scope = tracer.activateSpan(span);
+                if (log.isInfoEnabled()) {
+                    log.info("Activated propagated trace context: parent_trace_id={}, new dd.trace_id={}, dd.span_id={}",
+                            resolveTraceId(attributes), CorrelationIdentifier.getTraceId(), CorrelationIdentifier.getSpanId());
+                }
+            }
+            return operation.execute();
+        } finally {
+            deactivate(scope, span);
+        }
+    }
+
+    /**
+     * Executes a void operation within the propagated trace context.
+     *
+     * Usage:
+     * <pre>
+     * PubSubTraceContextHelper.runWithTrace(
+     *     message.getAttributes(), "events.process",
+     *     () -> eventHandlerStrategyDelegator.determineAndCallStrategy(pubsubRequest, headers));
+     * </pre>
+     */
+    public static void runWithTrace(Map<String, String> attributes, String operationName,
+                                     TracedRunnable operation) throws Exception {
+        executeWithTrace(attributes, operationName, () -> {
+            operation.run();
+            return null;
+        });
+    }
+
+    private static SpanContext extractTraceContext(Map<String, String> attributes) {
         if (attributes == null) {
             return null;
         }
 
-        // Support both "x-datadog-trace-id" (standard) and "dd.trace_id" (legacy) formats
-        String traceId = attributes.get(X_DATADOG_TRACE_ID);
-        if (traceId == null || traceId.isEmpty()) {
-            traceId = attributes.get(DD_TRACE_ID);
-        }
-
+        String traceId = resolveTraceId(attributes);
         if (traceId == null || traceId.isEmpty() || EMPTY_TRACE_ID.equals(traceId)) {
             log.debug("No trace ID found in PubSub attributes, skipping trace activation");
             return null;
         }
 
-        // Build carrier map with standard Datadog propagation headers
         Map<String, String> carrier = new HashMap<>();
         carrier.put(X_DATADOG_TRACE_ID, traceId);
         carrier.put(X_DATADOG_PARENT_ID,
@@ -66,45 +125,30 @@ public class PubSubTraceContextHelper {
                     carrier.get(X_DATADOG_TRACE_ID), carrier.get(X_DATADOG_PARENT_ID));
         }
 
-        try {
-            Tracer tracer = GlobalTracer.get();
-            SpanContext extractedContext = tracer.extract(
-                    Format.Builtin.TEXT_MAP, new TextMapAdapter(carrier));
-
-            if (extractedContext != null) {
-                Span childSpan = tracer.buildSpan("pubsub.consume")
-                        .asChildOf(extractedContext)
-                        .start();
-                Scope scope = tracer.activateSpan(childSpan);
-                if (log.isInfoEnabled()) {
-                    log.info("Activated propagated trace context: parent_trace_id={}, new dd.trace_id={}, dd.span_id={}",
-                            traceId, CorrelationIdentifier.getTraceId(), CorrelationIdentifier.getSpanId());
-                }
-                return scope;
-            } else {
-                log.warn("Could not extract trace context from PubSub attributes (tracer returned null), trace_id={}", traceId);
-                return null;
-            }
-        } catch (Exception e) {
-            log.warn("Error activating trace context from PubSub: {}", e.getMessage());
-            return null;
-        }
+        return GlobalTracer.get().extract(Format.Builtin.TEXT_MAP, new TextMapAdapter(carrier));
     }
 
-    /**
-     * Deactivates the trace scope and finishes the span.
-     * Safe to call with null.
-     */
-    public static void deactivateTrace(Scope scope) {
+    private static String resolveTraceId(Map<String, String> attributes) {
+        String traceId = attributes.get(X_DATADOG_TRACE_ID);
+        if (traceId == null || traceId.isEmpty()) {
+            traceId = attributes.get(DD_TRACE_ID);
+        }
+        return traceId;
+    }
+
+    private static void deactivate(Scope scope, Span span) {
         if (scope != null) {
             try {
-                Span span = GlobalTracer.get().activeSpan();
                 scope.close();
-                if (span != null) {
-                    span.finish();
-                }
             } catch (Exception e) {
-                log.warn("Error deactivating trace scope: {}", e.getMessage());
+                log.trace("Error closing trace scope: {}", e.getMessage());
+            }
+        }
+        if (span != null) {
+            try {
+                span.finish();
+            } catch (Exception e) {
+                log.trace("Error finishing trace span: {}", e.getMessage());
             }
         }
     }

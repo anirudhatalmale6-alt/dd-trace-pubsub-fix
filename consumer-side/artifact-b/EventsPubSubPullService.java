@@ -111,11 +111,10 @@ public class EventsPubSubPullService implements ApplicationListener<ApplicationR
             log.info("Processing message from subscription :: {}", subscription);
 
             // Activate the propagated trace context from upstream service
-            try (PubSubTraceContextHelper.TraceScope traceScope =
-                         PubSubTraceContextHelper.activateTraceFromAttributes(
-                                 attributes, "pubsub.pull." + subscription)) {
+            PubSubTraceContextHelper.runWithTrace(
+                    attributes, "pubsub.pull." + subscription, () -> {
                 routeMessage(request, eventType);
-            }
+            });
 
             message.ack();
         } catch (Exception e) {

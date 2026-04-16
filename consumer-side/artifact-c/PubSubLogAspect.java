@@ -1,13 +1,11 @@
 package osmos.commerce.marketplace.orderorchestrator.common.aspect;
 
 import com.google.cloud.spring.pubsub.support.converter.ConvertedAcknowledgeablePubsubMessage;
-import io.opentracing.Scope;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.aspectj.lang.JoinPoint;
-import org.aspectj.lang.annotation.After;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
-import org.aspectj.lang.annotation.Before;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 import osmos.commerce.marketplace.orderorchestrator.common.utils.PubSubTraceContextHelper;
@@ -27,52 +25,52 @@ public class PubSubLogAspect implements MDCLogAspect {
 
     private final TenantMapper tenantMapper;
 
-    // ThreadLocal to hold the active trace scope for the duration of request processing
-    private static final ThreadLocal<Scope> traceScope = new ThreadLocal<>();
-
-    @Before("within(osmos.commerce.marketplace.orderorchestrator.controllers..*) and args (pubsubRequest)")
-    public void aspect(JoinPoint joinPoint, PubsubRequest pubsubRequest) {
+    @Around("within(osmos.commerce.marketplace.orderorchestrator.controllers..*) && args(pubsubRequest)")
+    public Object aroundPushController(ProceedingJoinPoint joinPoint, PubsubRequest pubsubRequest) throws Exception {
         request(pubsubRequest);
         message(pubsubRequest.getMessage());
         headers(pubsubRequest.getMessage().getAttributes());
 
-        // Activate trace context from incoming PubSub message
-        Scope scope = PubSubTraceContextHelper.activateTraceFromPubSub(
-                pubsubRequest.getMessage().getAttributes());
-        if (scope != null) {
-            traceScope.set(scope);
+        try {
+            return PubSubTraceContextHelper.executeWithTrace(
+                    pubsubRequest.getMessage().getAttributes(), "pubsub.push.process",
+                    () -> {
+                        try {
+                            return joinPoint.proceed();
+                        } catch (Exception e) {
+                            throw e;
+                        } catch (Throwable t) {
+                            throw new RuntimeException(t);
+                        }
+                    });
+        } finally {
+            MDC.clear();
         }
     }
 
-    @After("within(osmos.commerce.marketplace.orderorchestrator.controllers..*) and args (pubsubRequest)")
-    public void aspectClear(JoinPoint joinPoint, PubsubRequest pubsubRequest) {
-        // Deactivate trace scope before clearing MDC
-        PubSubTraceContextHelper.deactivateTrace(traceScope.get());
-        traceScope.remove();
-        MDC.clear();
-    }
-
-
-    @Before("within(osmos.commerce.marketplace.orderorchestrator.publish..*) and args (message, subscription)")
-    public void aspectPull(JoinPoint joinPoint, ConvertedAcknowledgeablePubsubMessage<String> message, String subscription) {
+    @Around("within(osmos.commerce.marketplace.orderorchestrator.publish..*) && args(message, subscription)")
+    public Object aroundPullSubscriber(ProceedingJoinPoint joinPoint,
+                                        ConvertedAcknowledgeablePubsubMessage<String> message,
+                                        String subscription) throws Exception {
         headers();
         message(message);
         headers(message.getPubsubMessage().getAttributesMap());
 
-        // Activate trace context from incoming PubSub message (pull path)
-        Scope scope = PubSubTraceContextHelper.activateTraceFromPubSub(
-                message.getPubsubMessage().getAttributesMap());
-        if (scope != null) {
-            traceScope.set(scope);
+        try {
+            return PubSubTraceContextHelper.executeWithTrace(
+                    message.getPubsubMessage().getAttributesMap(), "pubsub.pull.process",
+                    () -> {
+                        try {
+                            return joinPoint.proceed();
+                        } catch (Exception e) {
+                            throw e;
+                        } catch (Throwable t) {
+                            throw new RuntimeException(t);
+                        }
+                    });
+        } finally {
+            MDC.clear();
         }
-    }
-
-    @After("within(osmos.commerce.marketplace.orderorchestrator.publish..*) and args (message, subscription)")
-    public void aspectClear(JoinPoint joinPoint, ConvertedAcknowledgeablePubsubMessage<String> message, String subscription) {
-        // Deactivate trace scope before clearing MDC
-        PubSubTraceContextHelper.deactivateTrace(traceScope.get());
-        traceScope.remove();
-        MDC.clear();
     }
 
     private void request(PubsubRequest request) {

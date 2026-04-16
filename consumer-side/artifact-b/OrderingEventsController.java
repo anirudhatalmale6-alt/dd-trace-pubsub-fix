@@ -82,9 +82,8 @@ public class OrderingEventsController {
         populateTraceIdHeader(message);
 
         // Activate the propagated trace context from upstream service
-        try (PubSubTraceContextHelper.TraceScope traceScope =
-                     PubSubTraceContextHelper.activateTraceFromAttributes(
-                             message.getAttributes(), "ordering-events.process")) {
+        return PubSubTraceContextHelper.executeWithTrace(
+                message.getAttributes(), "ordering-events.process", () -> {
 
             log.info(escapeJava(format("Received ordering-events PubSub Event  :: %s, from subscription :: %s",
                     writeValueAsString(message),
@@ -99,9 +98,9 @@ public class OrderingEventsController {
 
             eventPublisher.publishEventWithOrderingKey(List.of(coreSellerOrderOrderingEventsTopicName), Map.of("data", coreEvent.getData()),
                     message.getAttributes(), orderNumber);
-        }
 
-        return ResponseEntity.status(OK).build();
+            return ResponseEntity.status(OK).build();
+        });
     }
 
     private static void populateTraceIdHeader(PubsubMessage message) {
