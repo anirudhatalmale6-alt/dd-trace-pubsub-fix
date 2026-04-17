@@ -1,6 +1,5 @@
 package osmos.commerce.order.publish;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +32,22 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class EventPublisherTest {
 
+    private static final String TEST_TOPIC = "test-topic";
+    private static final String TEST_VALUE = "{\"data\":\"payload\"}";
+    private static final String TEST_TRACE_ID = "1234567890";
+    private static final String TEST_SPAN_ID = "9876543210";
+    private static final String HEADER_AUTHORIZATION = "Authorization";
+    private static final String HEADER_DD_TRACE_ID = "dd.trace_id";
+    private static final String HEADER_X_DATADOG_TRACE_ID = "x-datadog-trace-id";
+    private static final String HEADER_X_DATADOG_PARENT_ID = "x-datadog-parent-id";
+    private static final String HEADER_X_DATADOG_SAMPLING = "x-datadog-sampling-priority";
+    private static final String DLQ_TOPIC = "dlq-topic";
+    private static final String DATA_KEY = "data";
+    private static final String DATA_VALUE = "payload";
+    private static final String BEARER_TOKEN = "Bearer token";
+    private static final String PRE_EXISTING = "pre-existing";
+    private static final String ZERO = "0";
+
     @Mock
     private PubSubPublisherTemplate pubSubPublisherTemplate;
 
@@ -51,278 +66,237 @@ class EventPublisherTest {
     @Captor
     private ArgumentCaptor<PubsubMessage> pubsubMessageCaptor;
 
-    private static final String TEST_TOPIC = "test-topic";
-    private static final String TEST_VALUE = "{\"key\":\"value\"}";
-    private static final String TEST_TRACE_ID = "1234567890";
-    private static final String TEST_SPAN_ID = "9876543210";
-
     @BeforeEach
     void setUp() {
         when(toJsonConverter.convert(any())).thenReturn(TEST_VALUE);
     }
 
-    // ==================== publishToPubSub tests ====================
+    private Map<String, String> createHeaders() {
+        return new HashMap<>();
+    }
+
+    private Map<String, String> createHeadersWithAuth() {
+        Map<String, String> headers = new HashMap<>();
+        headers.put(HEADER_AUTHORIZATION, BEARER_TOKEN);
+        return headers;
+    }
+
+    private Object createData() {
+        return Map.of(DATA_KEY, DATA_VALUE);
+    }
+
+    // ==================== publishToPubSub ====================
 
     @Test
-    void publishToPubSub_shouldPublishToAllTopics() {
+    void shouldPublishToAllTopics() {
         List<String> topics = List.of("topic-1", "topic-2");
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Authorization", "Bearer token");
-        Object data = Map.of("key", "value");
+        Map<String, String> headers = createHeadersWithAuth();
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToPubSub(topics, data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToPubSub(topics, createData(), headers);
         }
 
         verify(pubSubPublisherTemplate, times(2)).publish(anyString(), eq(TEST_VALUE), any());
-        assertThat(headers).doesNotContainKey("Authorization");
+        assertThat(headers).doesNotContainKey(HEADER_AUTHORIZATION);
     }
 
     @Test
-    void publishToPubSub_shouldInjectTraceContext() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        Object data = Map.of("key", "value");
+    void shouldInjectTraceContextWhenPublishing() {
+        Map<String, String> headers = createHeaders();
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToPubSub(topics, data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToPubSub(List.of(TEST_TOPIC), createData(), headers);
         }
 
         verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        assertThat(capturedHeaders).containsEntry("dd.trace_id", TEST_TRACE_ID);
-        assertThat(capturedHeaders).containsEntry("x-datadog-trace-id", TEST_TRACE_ID);
-        assertThat(capturedHeaders).containsEntry("x-datadog-parent-id", TEST_SPAN_ID);
-        assertThat(capturedHeaders).containsEntry("x-datadog-sampling-priority", "1");
+        Map<String, String> captured = headersCaptor.getValue();
+        assertThat(captured).containsEntry(HEADER_DD_TRACE_ID, TEST_TRACE_ID);
+        assertThat(captured).containsEntry(HEADER_X_DATADOG_TRACE_ID, TEST_TRACE_ID);
+        assertThat(captured).containsEntry(HEADER_X_DATADOG_PARENT_ID, TEST_SPAN_ID);
+        assertThat(captured).containsEntry(HEADER_X_DATADOG_SAMPLING, "1");
     }
 
     @Test
-    void publishToPubSub_shouldNotOverwriteExistingTraceHeaders() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        headers.put("dd.trace_id", "existing-trace");
-        headers.put("x-datadog-trace-id", "existing-x-trace");
-        Object data = Map.of("key", "value");
+    void shouldNotOverwriteExistingTraceHeaders() {
+        Map<String, String> headers = createHeaders();
+        headers.put(HEADER_DD_TRACE_ID, PRE_EXISTING);
+        headers.put(HEADER_X_DATADOG_TRACE_ID, PRE_EXISTING);
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToPubSub(topics, data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToPubSub(List.of(TEST_TOPIC), createData(), headers);
         }
 
         verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        assertThat(capturedHeaders).containsEntry("dd.trace_id", "existing-trace");
-        assertThat(capturedHeaders).containsEntry("x-datadog-trace-id", "existing-x-trace");
+        Map<String, String> captured = headersCaptor.getValue();
+        assertThat(captured).containsEntry(HEADER_DD_TRACE_ID, PRE_EXISTING);
+        assertThat(captured).containsEntry(HEADER_X_DATADOG_TRACE_ID, PRE_EXISTING);
     }
 
     @Test
-    void publishToPubSub_shouldNotInjectTraceWhenTraceIdIsNull() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        Object data = Map.of("key", "value");
+    void shouldSkipTraceInjectionWhenTraceIdIsNull() {
+        Map<String, String> headers = createHeaders();
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(null);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(null);
-
-            eventPublisher.publishToPubSub(topics, data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(null);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(null);
+            eventPublisher.publishToPubSub(List.of(TEST_TOPIC), createData(), headers);
         }
 
         verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        assertThat(capturedHeaders).doesNotContainKey("dd.trace_id");
-        assertThat(capturedHeaders).doesNotContainKey("x-datadog-trace-id");
+        assertThat(headersCaptor.getValue()).doesNotContainKey(HEADER_DD_TRACE_ID);
+        assertThat(headersCaptor.getValue()).doesNotContainKey(HEADER_X_DATADOG_TRACE_ID);
     }
 
     @Test
-    void publishToPubSub_shouldNotInjectTraceWhenTraceIdIsZero() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        Object data = Map.of("key", "value");
+    void shouldSkipTraceInjectionWhenTraceIdIsZero() {
+        Map<String, String> headers = createHeaders();
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn("0");
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn("0");
-
-            eventPublisher.publishToPubSub(topics, data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(ZERO);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(ZERO);
+            eventPublisher.publishToPubSub(List.of(TEST_TOPIC), createData(), headers);
         }
 
         verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        assertThat(capturedHeaders).doesNotContainKey("dd.trace_id");
-        assertThat(capturedHeaders).doesNotContainKey("x-datadog-trace-id");
+        assertThat(headersCaptor.getValue()).doesNotContainKey(HEADER_DD_TRACE_ID);
     }
 
     @Test
-    void publishToPubSub_shouldHandleNullSpanId() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        Object data = Map.of("key", "value");
+    void shouldUseZeroFallbackWhenSpanIdIsNull() {
+        Map<String, String> headers = createHeaders();
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(null);
-
-            eventPublisher.publishToPubSub(topics, data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(null);
+            eventPublisher.publishToPubSub(List.of(TEST_TOPIC), createData(), headers);
         }
 
         verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        assertThat(capturedHeaders).containsEntry("x-datadog-parent-id", "0");
+        assertThat(headersCaptor.getValue()).containsEntry(HEADER_X_DATADOG_PARENT_ID, ZERO);
     }
 
-    // ==================== publishToPubSubWithOrderingKey tests ====================
+    @Test
+    void shouldNotInjectDdTraceIdWhenOnlyDdExists() {
+        Map<String, String> headers = createHeaders();
+        headers.put(HEADER_DD_TRACE_ID, PRE_EXISTING);
+
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToPubSub(List.of(TEST_TOPIC), createData(), headers);
+        }
+
+        verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
+        Map<String, String> captured = headersCaptor.getValue();
+        assertThat(captured).containsEntry(HEADER_DD_TRACE_ID, PRE_EXISTING);
+        assertThat(captured).containsEntry(HEADER_X_DATADOG_TRACE_ID, TEST_TRACE_ID);
+    }
 
     @Test
-    void publishToPubSubWithOrderingKey_shouldPublishWithOrderingKey() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Authorization", "Bearer token");
-        Object data = Map.of("key", "value");
+    void shouldNotInjectXDatadogWhenOnlyXDatadogExists() {
+        Map<String, String> headers = createHeaders();
+        headers.put(HEADER_X_DATADOG_TRACE_ID, PRE_EXISTING);
+
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToPubSub(List.of(TEST_TOPIC), createData(), headers);
+        }
+
+        verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
+        Map<String, String> captured = headersCaptor.getValue();
+        assertThat(captured).containsEntry(HEADER_DD_TRACE_ID, TEST_TRACE_ID);
+        assertThat(captured).containsEntry(HEADER_X_DATADOG_TRACE_ID, PRE_EXISTING);
+        assertThat(captured).doesNotContainKey(HEADER_X_DATADOG_PARENT_ID);
+    }
+
+    // ==================== publishToPubSubWithOrderingKey ====================
+
+    @Test
+    void shouldPublishWithOrderingKey() {
+        Map<String, String> headers = createHeadersWithAuth();
         String orderingKey = "order-123";
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToPubSubWithOrderingKey(topics, data, headers, orderingKey);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToPubSubWithOrderingKey(List.of(TEST_TOPIC), createData(), headers, orderingKey);
         }
 
         verify(pubSubOrderingKeyPublisherTemplate).publish(eq(TEST_TOPIC), pubsubMessageCaptor.capture());
-        PubsubMessage capturedMessage = pubsubMessageCaptor.getValue();
-        assertThat(capturedMessage.getOrderingKey()).isEqualTo(orderingKey);
-        assertThat(capturedMessage.getData()).isEqualTo(ByteString.copyFromUtf8(TEST_VALUE));
-        assertThat(capturedMessage.getAttributesMap()).containsEntry("dd.trace_id", TEST_TRACE_ID);
-        assertThat(capturedMessage.getAttributesMap()).containsEntry("x-datadog-trace-id", TEST_TRACE_ID);
-        assertThat(headers).doesNotContainKey("Authorization");
+        PubsubMessage captured = pubsubMessageCaptor.getValue();
+        assertThat(captured.getOrderingKey()).isEqualTo(orderingKey);
+        assertThat(captured.getData()).isEqualTo(ByteString.copyFromUtf8(TEST_VALUE));
+        assertThat(captured.getAttributesMap()).containsEntry(HEADER_DD_TRACE_ID, TEST_TRACE_ID);
+        assertThat(headers).doesNotContainKey(HEADER_AUTHORIZATION);
     }
 
     @Test
-    void publishToPubSubWithOrderingKey_shouldRemoveNullValues() {
-        List<String> topics = List.of(TEST_TOPIC);
+    void shouldRemoveNullHeaderValues() {
         Map<String, String> headers = new HashMap<>();
-        headers.put("valid-header", "value");
+        headers.put("valid-header", DATA_VALUE);
         headers.put("null-header", null);
-        Object data = Map.of("key", "value");
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToPubSubWithOrderingKey(topics, data, headers, "key-1");
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToPubSubWithOrderingKey(List.of(TEST_TOPIC), createData(), headers, "key-1");
         }
 
         verify(pubSubOrderingKeyPublisherTemplate).publish(eq(TEST_TOPIC), any(PubsubMessage.class));
         assertThat(headers).doesNotContainValue(null);
     }
 
-    // ==================== publishToDLQ tests ====================
+    // ==================== publishToDLQ ====================
 
     @Test
-    void publishToDLQ_shouldPublishToSingleTopic() {
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Authorization", "Bearer token");
-        Object data = Map.of("key", "value");
+    void shouldPublishToDlqTopic() {
+        Map<String, String> headers = createHeadersWithAuth();
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToDLQ("dlq-topic", data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToDLQ(DLQ_TOPIC, createData(), headers);
         }
 
-        verify(pubSubPublisherTemplate).publish(eq("dlq-topic"), eq(TEST_VALUE), any());
-        assertThat(headers).doesNotContainKey("Authorization");
+        verify(pubSubPublisherTemplate).publish(eq(DLQ_TOPIC), eq(TEST_VALUE), any());
+        assertThat(headers).doesNotContainKey(HEADER_AUTHORIZATION);
     }
 
     @Test
-    void publishToDLQ_shouldInjectTraceContext() {
-        Map<String, String> headers = new HashMap<>();
-        Object data = Map.of("key", "value");
+    void shouldInjectTraceContextInDlq() {
+        Map<String, String> headers = createHeaders();
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToDLQ("dlq-topic", data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishToDLQ(DLQ_TOPIC, createData(), headers);
         }
 
-        verify(pubSubPublisherTemplate).publish(eq("dlq-topic"), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        assertThat(capturedHeaders).containsEntry("dd.trace_id", TEST_TRACE_ID);
+        verify(pubSubPublisherTemplate).publish(eq(DLQ_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
+        assertThat(headersCaptor.getValue()).containsEntry(HEADER_DD_TRACE_ID, TEST_TRACE_ID);
     }
 
-    // ==================== publishReturnOrderToErrorTopic tests ====================
+    // ==================== publishReturnOrderToErrorTopic ====================
 
     @Test
-    void publishReturnOrderToErrorTopic_shouldPublishToErrorTopic() {
+    void shouldPublishToReturnRequestErrorTopic() {
         Map<String, String> headers = new HashMap<>();
-        headers.put("valid-header", "value");
+        headers.put("valid-header", DATA_VALUE);
         headers.put("null-header", null);
-        Object data = Map.of("returnRequestId", "123");
 
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishReturnOrderToErrorTopic(data, headers);
+        try (MockedStatic<CorrelationIdentifier> mocked = mockStatic(CorrelationIdentifier.class)) {
+            mocked.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
+            mocked.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
+            eventPublisher.publishReturnOrderToErrorTopic(createData(), headers);
         }
 
         verify(pubSubPublisherTemplate).publish(eq("return-request-error"), eq(TEST_VALUE), any());
-    }
-
-    // ==================== injectTraceContext edge cases ====================
-
-    @Test
-    void publishToPubSub_shouldNotInjectDdTraceIdWhenAlreadyExists() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        headers.put("dd.trace_id", "pre-existing-trace");
-        Object data = Map.of("key", "value");
-
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToPubSub(topics, data, headers);
-        }
-
-        verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        assertThat(capturedHeaders).containsEntry("dd.trace_id", "pre-existing-trace");
-        // x-datadog-trace-id should still be injected since it wasn't pre-existing
-        assertThat(capturedHeaders).containsEntry("x-datadog-trace-id", TEST_TRACE_ID);
-    }
-
-    @Test
-    void publishToPubSub_shouldNotInjectXDatadogTraceIdWhenAlreadyExists() {
-        List<String> topics = List.of(TEST_TOPIC);
-        Map<String, String> headers = new HashMap<>();
-        headers.put("x-datadog-trace-id", "pre-existing-x-trace");
-        Object data = Map.of("key", "value");
-
-        try (MockedStatic<CorrelationIdentifier> mockedCorrelation = mockStatic(CorrelationIdentifier.class)) {
-            mockedCorrelation.when(CorrelationIdentifier::getTraceId).thenReturn(TEST_TRACE_ID);
-            mockedCorrelation.when(CorrelationIdentifier::getSpanId).thenReturn(TEST_SPAN_ID);
-
-            eventPublisher.publishToPubSub(topics, data, headers);
-        }
-
-        verify(pubSubPublisherTemplate).publish(eq(TEST_TOPIC), eq(TEST_VALUE), headersCaptor.capture());
-        Map<String, String> capturedHeaders = headersCaptor.getValue();
-        // dd.trace_id should be injected since it wasn't pre-existing
-        assertThat(capturedHeaders).containsEntry("dd.trace_id", TEST_TRACE_ID);
-        // x-datadog-trace-id should keep original
-        assertThat(capturedHeaders).containsEntry("x-datadog-trace-id", "pre-existing-x-trace");
-        // x-datadog-parent-id should NOT be set since we skipped the x-datadog block
-        assertThat(capturedHeaders).doesNotContainKey("x-datadog-parent-id");
     }
 }
