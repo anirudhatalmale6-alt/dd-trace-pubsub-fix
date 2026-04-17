@@ -39,6 +39,7 @@ import static org.apache.commons.text.StringEscapeUtils.escapeJava;
 import static org.springframework.http.HttpStatus.OK;
 import static osmos.commerce.common.util.ApplicationConstants.AUTHORIZATION;
 import static osmos.commerce.common.util.ApplicationConstants.EVENT_ORDER_CREATED;
+import static osmos.commerce.sellerorder.config.ZipperUtil.decompressPubSubMessage;
 import static osmos.commerce.sellerorder.util.ApplicationConstants.ATTRIBUTE_COUNTRY;
 import static osmos.commerce.sellerorder.util.ApplicationConstants.EVENT_CUSTOMER_ORDER_CANCELLED_FOR_SELLER_ORDER;
 import static osmos.commerce.sellerorder.util.ObjectMapperUtils.writeValueAsString;
@@ -67,16 +68,8 @@ public class OrderingEventsController {
     public ResponseEntity<?> receiveOrderingEvents(@RequestHeader(name = AUTHORIZATION) String authorization,
                                                    @RequestAttribute Map<String, String> tracingHeaders,
                                                    @Valid @RequestBody PubsubRequest pubsubRequest) {
-        PubsubMessage message = attributesEnricher.enrichWithSubscription(pubsubRequest).getMessage();
-
-        log.info("before tracingheaders: {}", tracingHeaders);
-        message.getAttributes().forEach((k, v) -> {
-            if (v != null) {
-                tracingHeaders.putIfAbsent(k, v);
-            }
-        });
-        log.info("after tracingheaders: {}", tracingHeaders);
-
+        PubsubRequest toProcess = decompressPubSubMessage(pubsubRequest);
+        PubsubMessage message = attributesEnricher.enrichWithSubscription(toProcess).getMessage();
         String eventType = message.getEventType();
 
         populateTraceIdHeader(message);
@@ -87,7 +80,7 @@ public class OrderingEventsController {
 
             log.info(escapeJava(format("Received ordering-events PubSub Event  :: %s, from subscription :: %s",
                     writeValueAsString(message),
-                    pubsubRequest.getSubscription())));
+                    toProcess.getSubscription())));
 
             CoreEvent coreEvent = eventMapper.determineEvent(message, eventType);
 
@@ -109,7 +102,6 @@ public class OrderingEventsController {
         log.info("dd.trace_id: from attributes {}", traceId);
         if (traceId != null) {
             MDC.put("dd.trace_id", traceId);
-            MDC.put("dd.span_id", "0");
         }
     }
 
