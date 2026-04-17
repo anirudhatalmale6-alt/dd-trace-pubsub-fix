@@ -74,7 +74,6 @@ public class OrderingEventsController {
 
         populateTraceIdHeader(message);
 
-        // Activate the propagated trace context from upstream service
         return PubSubTraceContextHelper.executeWithTrace(
                 message.getAttributes(), "ordering-events.process", () -> {
 

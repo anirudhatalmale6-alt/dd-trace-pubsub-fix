@@ -35,6 +35,7 @@ import static osmos.commerce.common.util.ApplicationConstants.ATTRIBUTE_TENANT_I
 import static osmos.commerce.common.util.ApplicationConstants.AUTHORIZATION;
 import static osmos.commerce.common.util.ApplicationConstants.X_SITE_ID;
 import static osmos.commerce.common.util.ApplicationConstants.X_TENANT_ID;
+import static osmos.commerce.sellerorder.config.ZipperUtil.decompressPubSubMessage;
 import static osmos.commerce.sellerorder.util.ApplicationConstants.ATTRIBUTE_X_PERF_ID;
 import static osmos.commerce.sellerorder.util.ApplicationConstants.EVENT_MANIFEST_CREATED;
 import static osmos.commerce.sellerorder.util.ApplicationConstants.EVENT_ORDER_STATUS_CREATED;
@@ -57,7 +58,8 @@ public class EventsController {
     public ResponseEntity<?> receiveEvents(@RequestHeader(name = AUTHORIZATION) String authorization,
                                            @RequestAttribute Map<String, String> tracingHeaders,
                                            @Valid @RequestBody PubsubRequest pubsubRequest) {
-        PubsubMessage message = attributesEnricher.enrichWithSubscription(pubsubRequest).getMessage();
+        PubsubRequest toProcess = decompressPubSubMessage(pubsubRequest);
+        PubsubMessage message = attributesEnricher.enrichWithSubscription(toProcess).getMessage();
         String tenantId = message.getAttributes().containsKey(ATTRIBUTE_TENANT_ID) ?
                 String.valueOf(message.getTenantId()) : "";
 
@@ -65,7 +67,7 @@ public class EventsController {
 
         String version = message.getAttributes().getOrDefault("version", "");
 
-        MDCUtil.setMDCAttributes(pubsubRequest);
+        MDCUtil.setMDCAttributes(toProcess);
 
         if (!environmentProperties.getAllowedTenantIds().contains(tenantId)) {
             log.info(escapeJava(format("Unsupported tenantId :: %s for event :: %s", tenantId, eventType)));
@@ -77,16 +79,15 @@ public class EventsController {
             return ResponseEntity.status(OK).build();
         }
 
-        // Activate the propagated trace context from upstream service
         return PubSubTraceContextHelper.executeWithTrace(
                 message.getAttributes(), "events.process", () -> {
 
-            String deliveryAttemptLog = Optional.ofNullable(pubsubRequest.getDeliveryAttempt())
+            String deliveryAttemptLog = Optional.ofNullable(toProcess.getDeliveryAttempt())
                     .map(s -> format(" and delivery attempt :: %s", s))
                     .orElse("");
             log.info(escapeJava(format("Received PubSub Event :: %s, from subscription :: %s%s",
                     writeValueAsString(message),
-                    pubsubRequest.getSubscription(),
+                    toProcess.getSubscription(),
                     deliveryAttemptLog)));
 
             if (equalsIgnoreCase(EVENT_ORDER_STATUS_CREATED, eventType) &&
@@ -111,15 +112,14 @@ public class EventsController {
                 headers.put(IDEMPOTENT_KEY_FIELD_NAME, message.getAttributes().get(IDEMPOTENT_KEY_FIELD_NAME));
             }
 
-            if (equalsIgnoreCase(pubsubRequest.getMessage().getEventType(), EVENT_MANIFEST_CREATED)) {
+            if (equalsIgnoreCase(toProcess.getMessage().getEventType(), EVENT_MANIFEST_CREATED)) {
                 eventHandlerStrategyDelegator.convertToCoreEventPayload(message);
             }
 
-            eventHandlerStrategyDelegator.determineAndCallStrategy(pubsubRequest, headers);
+            eventHandlerStrategyDelegator.determineAndCallStrategy(toProcess, headers);
 
             return ResponseEntity.status(OK).build();
         });
-
     }
 
 
